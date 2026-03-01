@@ -1,6 +1,6 @@
-# Peeling Back the Layers of Security: Security Onion
+# The Intern That Never Sleeps: Putting Security Onion's AI to Work
 
-A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capabilities with AI Summaries, Guided Analysis, Playbooks, and the Onion AI Assistant while using real attack traffic!!
+A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capabilities — AI Summaries, Guided Analysis, Playbooks, and the Onion AI Assistant — using real attack traffic.
 
 ## Architecture
 
@@ -20,9 +20,16 @@ A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capa
 │  │  Attacker    │  │  Victim      │  │ SO Monitor  │    │
 │  │  10.0.2.20   │─▶│  10.0.2.30  │  │ NIC (eth1)  │    │
 │  │  Nmap, curl  │  │  Apache, SSH │  │ 10.0.2.10   │    │
-│  └──────────────┘  └──────────────┘  └─────────────┘    │
+│  └──────┬───────┘  └──────────────┘  └──────▲──────┘    │
+│         │                                    │           │
+│         └──── attack.sh targets eth1 ────────┘           │
 └──────────────────────────────────────────────────────────┘
 ```
+
+> **Note:** Azure does not mirror traffic between VMs on the same subnet.
+> Attack traffic between the attacker and victim VMs will NOT be seen by
+> SO's monitoring interface. To generate Suricata alerts, attacks must be
+> directed at SO's monitoring NIC (10.0.2.10) using `attack.sh`.
 
 ## Prerequisites
 
@@ -30,7 +37,7 @@ A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capa
 - **Terraform** ≥ 1.5.0 — `brew install hashicorp/tap/terraform`
 - **Azure CLI** — `brew install azure-cli && az login`
 
-## Deploy (5 Steps)
+## Deploy (6 Steps)
 
 ### 1. Accept Marketplace Terms (one-time)
 
@@ -79,20 +86,22 @@ chmod 600 ~/.ssh/so-lab-key.pem
 
 ### 5. Set Up Security Onion
 
-SSH into the SO VM — the setup wizard launches on first login:
+**Important:** After `terraform apply`, wait 30-40 minutes before SSHing in. The Marketplace image auto-launches the setup wizard on first boot. SSHing in too early can interfere with the setup process.
+
+After waiting, SSH into the SO VM:
 
 ```bash
 SO_IP=$(terraform output -json security_onion | jq -r '.public_ip')
-ssh -i ~/.ssh/so-lab-key.pem labadmin@$SO_IP
+ssh -i ~/.ssh/so-lab-key.pem -o ServerAliveInterval=60 labadmin@$SO_IP
 ```
 
-In the wizard, choose:
+If the setup wizard launches interactively, choose:
 - **STANDALONE** mode
 - **eth0** for management
 - **eth1** for monitoring
 - Set your admin email + password
 
-Wait 15-30 minutes for install. Elasticsearch may take extra time — if the SSH session times out, just reconnect. After install completes:
+Wait 15-30 minutes for install. If the SSH session times out, just reconnect — the install continues in the background. After install completes:
 
 ```bash
 # Verify all services are running
@@ -102,35 +111,56 @@ sudo so-status
 sudo docker restart so-elasticsearch
 # Wait 60 seconds, then check again:
 sudo so-status
-
-# Fix public IP access (rewrites nginx/kratos URLs + opens firewall)
-sudo bash ~/so-fix-public-access.sh
 ```
 
-Access the SOC console: `https://<SO_PUBLIC_IP>` (accept the self-signed cert warning).
+### 6. Fix Public IP Access
+
+The SOC console defaults to the private IP (`10.0.1.10`). Fix it:
+
+```bash
+PUBLIC_IP=<YOUR_SO_PUBLIC_IP>
+sudo sed -i "s|10.0.1.10|$PUBLIC_IP|g" /opt/so/conf/nginx/nginx.conf
+sudo sed -i "s|10.0.1.10|$PUBLIC_IP|g" /opt/so/conf/kratos/kratos.yaml
+sudo iptables -I INPUT 2 -p tcp --dport 443 -j ACCEPT
+sudo iptables -I INPUT 2 -p tcp --dport 80 -j ACCEPT
+sudo docker restart so-nginx so-kratos
+```
+
+To make this permanent (survives Salt highstates), also update the Salt pillar:
+
+```bash
+sudo sed -i "s|url_base: '10.0.1.10'|url_base: '$PUBLIC_IP'|g" \
+  /opt/so/saltstack/local/pillar/global/soc_global.sls
+```
+
+Access the SOC console: `https://<SO_PUBLIC_IP>` in Chrome (accept the self-signed cert warning). Brave browser may not work due to shield/ad-blocking interference with self-signed certs.
 
 ## Run Attacks
+
+Attacks must target SO's monitoring NIC (`10.0.2.10`) directly — Azure does not mirror inter-VM traffic to eth1.
 
 ```bash
 ATTACKER_IP=$(terraform output -json attacker | jq -r '.public_ip')
 ssh -i ~/.ssh/so-lab-key.pem labadmin@$ATTACKER_IP
 
-cd ~/attacks
-./run_all.sh --dry-run   # Preview what will run
-./run_all.sh             # Execute all stages
+# Run the alert generator (scans, DNS, protocol probes)
+sudo bash ~/attacks/attack.sh 10.0.2.10
 ```
 
-Then check the SOC console for alerts with AI Summaries and Guided Analysis.
+Wait 2-3 minutes after completion, then check the SOC console: Alerts → Last 1 hour → Refresh.
 
-## Attack Scripts
+### What `attack.sh` Does
 
-| Script | Stage | What SO Detects |
-|--------|-------|-----------------|
-| `01_recon.sh` | Nmap scans | Scan detection rules, Zeek conn.log patterns |
-| `02_malicious_traffic.sh` | DGA DNS + suspicious user-agents | ET sigs, suspicious DNS/HTTP logs |
-| `03_c2_beacon.sh` | Self-signed TLS beacon with jitter | Zeek ssl.log, periodic conn.log |
-| `04_exfil_sim.sh` | HTTPS exfil + DNS tunneling | Anomalous outbound volume, tunnel patterns |
-| `run_all.sh` | Runs all stages | Full kill chain visibility |
+| Stage | Technique | Suricata Rules Triggered |
+|-------|-----------|--------------------------|
+| 1 - Port Scans | SYN, FIN, XMAS, NULL, ACK, UDP, OS fingerprint | ET SCAN, ET POLICY |
+| 2 - Protocol Probes | Telnet, FTP, SMB, SNMP, SSH brute force, RDP | ET FTP, ET POLICY, ET NETBIOS |
+| 3 - Malicious DNS | DGA domains, DNS tunneling, TXT C2, zone transfers | ET DNS, Zeek dns.log anomalies |
+
+> **Note:** HTTP-based attacks (SQLi, XSS, Shellshock) require a web server
+> listening on the target. Since SO's monitoring NIC is passive, these won't
+> generate alerts. Use PCAP imports for HTTP-layer detections if needed:
+> `sudo so-import-pcap /path/to/malware.pcap`
 
 ## Security Onion AI Features
 
@@ -245,7 +275,12 @@ Your home IP may have changed. Check with `curl -s ifconfig.me`, update `admin_c
 ### Post-Restart Issues
 
 **SO services down after VM restart or deallocate/start:**
-Services take 5-10 minutes to start after a reboot. Check with `sudo so-status`. If it shows "No highstate has completed since the system was restarted," just wait. The iptables and nginx/kratos URL fixes do NOT persist across deallocate cycles — you'll need to re-run them:
+Services take 5-10 minutes to start after a reboot. Check with `sudo so-status`. If it shows "No highstate has completed since the system was restarted," just wait. The iptables rules do NOT persist across deallocate cycles — you'll need to re-run them. If you updated the Salt pillar `url_base` (see Step 6), nginx/kratos configs will survive highstates, but iptables still needs re-adding:
+```bash
+sudo iptables -I INPUT 2 -p tcp --dport 443 -j ACCEPT
+sudo iptables -I INPUT 2 -p tcp --dport 80 -j ACCEPT
+```
+If you did NOT update the Salt pillar, you'll also need to re-run the full sed fix:
 ```bash
 PUBLIC_IP=<YOUR_PUBLIC_IP>
 sudo sed -i "s|10.0.1.10|$PUBLIC_IP|g" /opt/so/conf/nginx/nginx.conf
@@ -258,15 +293,16 @@ sudo docker restart so-nginx so-kratos
 **Password issues:**
 Reset with `sudo so-user passwd your-email@example.com`. List users with `sudo so-user list`.
 
-**Attacker.sh**
+**Attack.sh**
 
-The purpose of this file is to be copy & pasted into the Attacker VM if you wish for additional alerts to be generated as there may be a lack of substantial alerts generated via the scripts in the Terraform Configuration for the Attacker VM.
+This was an additional file that I created to ensure more alerts were being generated in Security Onion and was not included in part of the Terraform deployment. A challenge for you to is develop your own scripts to see how Security Onion behaves and acts!!
 
 ## File Structure
 
 ```
 security-onion-ai-demo/
 ├── README.md
+├── attack.sh
 └── terraform/
     ├── main.tf                          # Azure resources + post-deploy script
     ├── variables.tf                     # Configurable parameters
@@ -274,9 +310,23 @@ security-onion-ai-demo/
     ├── terraform.tfvars.example         # Template — copy to terraform.tfvars
     ├── .gitignore
     └── setup_scripts/
-        ├── attacker_cloud_init.yaml     # Attack tools + scripts
-        └── victim_cloud_init.yaml       # Apache + SSH target
+        ├── attacker_cloud_init.yaml     # Attack tools + base scripts
+        ├── victim_cloud_init.yaml       # Apache + SSH target
 ```
+
+## 🏆 DEFCON Challenge: Azure Virtual Network TAP
+
+The current setup requires `attack.sh` to target SO's monitoring NIC directly (`10.0.2.10`) because Azure does not mirror traffic between VMs on the same subnet to a third interface. This means attacker→victim traffic is invisible to Security Onion's passive monitoring.
+
+**Your challenge:** Configure [Azure Virtual Network TAP](https://learn.microsoft.com/en-us/azure/virtual-network/virtual-network-tap-overview) so that traffic between the attacker (`10.0.2.20`) and victim (`10.0.2.30`) is mirrored to SO's monitoring NIC (`eth1` / `10.0.2.10`). If done correctly, you can run attacks against the victim VM and have SO detect them passively — just like a real network tap or SPAN port.
+
+Hints:
+- Azure Virtual Network TAP is currently in preview and requires registration
+- You'll need to configure a TAP on the attacker and/or victim NIC with SO's eth1 as the destination
+- The Terraform `azurerm_virtual_network_tap` resource can automate the configuration
+- Alternatively, explore running a software tap/bridge on the victim VM that mirrors traffic to eth1
+
+If you get it working, please let me know, I'd love to know how you did it!
 
 ## License
 
