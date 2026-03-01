@@ -1,0 +1,22 @@
+# =============================================================================
+# REQUIRED — You must set these
+# =============================================================================
+
+subscription_id = "YOUR-SUBSCRIPTION-ID"    # az account show --query id -o tsv
+admin_cidr      = "YOUR.IP.ADDRESS/32"       # curl -s ifconfig.me, then add /32
+
+# =============================================================================
+# RECOMMENDED — Provide your SSH public key
+# =============================================================================
+
+# ssh_public_key = "ssh-rsa AAAA...your key..."   # cat ~/.ssh/id_rsa.pub
+
+# =============================================================================
+# OPTIONAL — Adjust VM sizes based on your Azure quota
+# =============================================================================
+
+# so_vm_size       = "Standard_B4ms"    # 4 vCPU, 16GB RAM (minimum, default)
+# so_vm_size       = "Standard_D8s_v5"  # 8 vCPU, 32GB RAM (recommended if quota allows)
+# attacker_vm_size = "Standard_B2ms"    # 2 vCPU, 8GB RAM
+# victim_vm_size   = "Standard_B2ms"    # 2 vCPU, 8GB RAM
+# location         = "eastus"

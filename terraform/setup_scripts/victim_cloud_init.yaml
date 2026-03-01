@@ -1,0 +1,15 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - apache2
+  - openssh-server
+  - netcat-openbsd
+
+runcmd:
+  - systemctl enable apache2
+  - systemctl start apache2
+  - echo "<html><body><h1>Victim Web Server</h1><p>Security Onion AI Demo Lab</p></body></html>" > /var/www/html/index.html
+  - systemctl enable ssh
+  - systemctl start ssh
