@@ -258,6 +258,10 @@ sudo docker restart so-nginx so-kratos
 **Password issues:**
 Reset with `sudo so-user passwd your-email@example.com`. List users with `sudo so-user list`.
 
+**Attacker.sh**
+
+The purpose of this file is to be copy & pasted into the Attacker VM if you wish for additional alerts to be generated as there may be a lack of substantial alerts generated via the scripts in the Terraform Configuration for the Attacker VM.
+
 ## File Structure
 
 ```
