@@ -1,4 +1,4 @@
-# Peeling Back the Layers of Security: Putting Security Onion's AI to Work
+# Peeling Back the Layers of Security: Security Onion
 
 A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capabilities — AI Summaries, Guided Analysis, Playbooks, and the Onion AI Assistant — using real attack traffic.
 
