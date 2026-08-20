@@ -1,0 +1,12 @@
+# mcp-server secrets / local env
+mcp-server/.env
+mcp-server/venv/
+mcp-server/__pycache__/
+mcp-server/*.pyc
+
+# stray SSH artifacts / role payloads if ever generated locally
+*.pem
+*.key
+role_mcp_readonly.json
+
+.DS_Store
