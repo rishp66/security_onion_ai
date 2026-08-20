@@ -20,9 +20,18 @@ A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capa
 │  │  Attacker    │  │  Victim      │  │ SO Monitor  │    │
 │  │  10.0.2.20   │─▶│  10.0.2.30  │  │ NIC (eth1)  │    │
 │  │  Nmap, curl  │  │  Apache, SSH │  │ 10.0.2.10   │    │
-│  └──────┬───────┘  └──────────────┘  └──────▲──────┘    │
-│         │                                    │           │
-│         └──── attack.sh targets eth1 ────────┘           │
+│  │              │  │  + Elastic   │  └──────▲──────┘    │
+│  │              │  │  Agent /     │         │           │
+│  │              │  │  Defend /    │         │           │
+│  │              │  │  auditd      │         │           │
+│  └──────┬───────┘  └──────┬───────┘         │           │
+│         │                 │                  │           │
+│         └── attack.sh targets eth1 ──────────┘           │
+│                           │                               │
+│                           └─▶ endpoint events (process/  │
+│                               file/auditd) ship straight  │
+│                               to SO's Elasticsearch via   │
+│                               Fleet — independent of eth1 │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -30,6 +39,17 @@ A Terraform-deployed Azure lab for demonstrating Security Onion's native AI capa
 > Attack traffic between the attacker and victim VMs will NOT be seen by
 > SO's monitoring interface. To generate Suricata alerts, attacks must be
 > directed at SO's monitoring NIC (10.0.2.10) using `attack.sh`.
+
+> **Note:** This is also why persistence detection works despite the VNET
+> TAP mirroring gap described in the [DEFCON Challenge](#-defcon-challenge-azure-virtual-network-tap)
+> section below. The victim VM (10.0.2.30) runs Elastic Agent + Elastic
+> Defend + auditd, which ship process/file events straight to Security
+> Onion's Elasticsearch over the management network (via Fleet) — this
+> path doesn't depend on Azure mirroring inter-VM traffic to the passive
+> monitoring NIC at all. Persistence techniques executed locally on the
+> victim (cron, systemd, SSH keys, etc.) are visible to SO through this
+> endpoint telemetry layer even though attacker→victim network traffic
+> still isn't. See `docs/endpoint-telemetry-setup.md` for setup.
 
 ## Prerequisites
 
@@ -162,6 +182,39 @@ Wait 2-3 minutes after completion, then check the SOC console: Alerts → Last 1
 > generate alerts. Use PCAP imports for HTTP-layer detections if needed:
 > `sudo so-import-pcap /path/to/malware.pcap`
 
+## Persistence Detection
+
+`persistence.sh` runs ON the victim VM (10.0.2.30) and plants five benign,
+idempotent Linux persistence techniques so their endpoint telemetry (process,
+file, and auditd events) shows up in Security Onion's Elasticsearch. Run it
+with `sudo bash persistence.sh`; reverse everything with
+`sudo bash persistence.sh --cleanup`.
+
+| Stage | Technique | ATT&CK ID | What It Plants |
+|-------|-----------|-----------|-----------------|
+| 1 - Shell profile beacon | Login script | T1546.004 | Beacon appended to `~/.bashrc` and `~/.profile` |
+| 2 - Cron persistence | Scheduled task | T1053.003 | `/etc/cron.d/system-health-check`, runs every 5 min |
+| 3 - systemd service + timer | Systemd service | T1543.002 | `system-metrics-agent.service` + `.timer`, enabled and started |
+| 4 - SSH authorized_keys implant | SSH authorized keys | T1098.004 | Implant key appended to `/root/.ssh/authorized_keys` |
+| 5 - Backdoor user + sudoers | Create account | T1136.001 | User `labsvc` + `/etc/sudoers.d/90-labsvc` (NOPASSWD:ALL) |
+
+> **Note:** These stages rely on the endpoint telemetry layer (Elastic Agent +
+> Elastic Defend + auditd on the victim VM), not the passive monitoring NIC —
+> see the architecture note above. `persistence.sh` is self-contained, uses
+> only a lab-internal beacon address, and ships a full `--cleanup` reversal.
+
+### How to Query
+
+Two ways to hunt the resulting telemetry:
+
+- **AI query layer (recommended):** the custom MCP server in `mcp-server/`
+  connects Claude Desktop to Security Onion's Elasticsearch (stdio transport,
+  read-only ES user, index allowlist, size cap, query timeout). Point Claude
+  Desktop at it and ask questions in natural language — see
+  `mcp-server/README.md` for setup.
+- **Manual fallback:** `queries/ground_truth.md` has hand-verified queries for
+  each stage above, for confirming what the AI layer should be finding.
+
 ## Security Onion AI Features
 
 | Feature | License | What It Does |
@@ -171,6 +224,7 @@ Wait 2-3 minutes after completion, then check the SOC console: Alerts → Last 1
 | **Guided Analysis** | Free | Automated investigation questions with inline query results |
 | **Onion AI Assistant** | Pro | Conversational LLM that queries your local SO data |
 | **MCP Server** | Pro | Connect your own LLM to SO via Model Context Protocol |
+| **Custom MCP Server (this repo)** | Free | Build-your-own alternative to the Pro MCP Server — `mcp-server/` connects Claude Desktop to SO's Elasticsearch (stdio, read-only ES user, index allowlist, size cap, query timeout) |
 
 ## Cost Management
 
@@ -303,15 +357,28 @@ This was an additional file that I created to ensure more alerts were being gene
 security-onion-ai-demo/
 ├── README.md
 ├── attack.sh
-└── terraform/
-    ├── main.tf                          # Azure resources + post-deploy script
-    ├── variables.tf                     # Configurable parameters
-    ├── outputs.tf                       # Connection info + quick start guide
-    ├── terraform.tfvars.example         # Template — copy to terraform.tfvars
-    ├── .gitignore
-    └── setup_scripts/
-        ├── attacker_cloud_init.yaml     # Attack tools + base scripts
-        ├── victim_cloud_init.yaml       # Apache + SSH target
+├── persistence.sh                       # Linux persistence stages (victim VM) + --cleanup
+├── terraform/
+│   ├── main.tf                          # Azure resources + post-deploy script
+│   ├── variables.tf                     # Configurable parameters
+│   ├── outputs.tf                       # Connection info + quick start guide
+│   ├── terraform.tfvars.example         # Template — copy to terraform.tfvars
+│   ├── .gitignore
+│   └── setup_scripts/
+│       ├── attacker_cloud_init.yaml     # Attack tools + base scripts
+│       ├── victim_cloud_init.yaml       # Apache + SSH target
+├── queries/
+│   └── ground_truth.md                  # Hand-verified ES/EQL queries per persistence stage
+├── mcp-server/
+│   ├── README.md                        # Setup + Claude Desktop config
+│   ├── server.py                        # stdio MCP server (list_indices, search)
+│   ├── requirements.txt
+│   ├── roles.md                         # Read-only ES role/user definition
+│   └── .env.example                     # ES connection template (no real creds)
+└── docs/
+    ├── endpoint-telemetry-setup.md      # Manual Fleet/Elastic Defend/auditd setup
+    ├── snapshot-and-recovery.md         # Azure snapshot + post-restart recovery
+    └── talk-day-runbook.md              # Sept 4 talk-day checklist
 ```
 
 ## 🏆 DEFCON Challenge: Azure Virtual Network TAP
